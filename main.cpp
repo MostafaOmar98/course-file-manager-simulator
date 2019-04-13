@@ -1,7 +1,7 @@
 /*
     Author: Mostafa Omar Mahmoud - 20170292
     Date: Apr. 13th 2019
-    Version 1.0
+    Version 1.1
     Fields & Record organization with File Structures using C++
     Manages 'Course' records with the following attributes:
     Course ID (Primary Key)
@@ -25,6 +25,7 @@
 #include <vector>
 #include <cstring>
 #include <algorithm>
+#include <map>
 
 using namespace std;
 
@@ -141,8 +142,34 @@ private:
             return offset < other.offset;
         }
     };
+    struct SecondaryIndex
+    {
+        string instructorName;
+        short RRN; // RRN of the first record in the LabeLID file
+        SecondaryIndex(string __instructorName, short __RRN)
+        {
+            instructorName = __instructorName;
+            RRN = __RRN;
+        }
+        bool operator <(const SecondaryIndex &other) const{
+            if (instructorName != other.instructorName)
+                return instructorName < other.instructorName;
+            return RRN < other.RRN;
+        }
+    };
+    struct LabelID{
+        char courseID[6];
+        short next;
+        LabelID(char __courseID[6] = "", short __next = 0)
+        {
+            strcpy(courseID, __courseID);
+            next = __next;
+        }
+    };
     vector<PrimaryIndexRecord> vPrimaryIndex;
-    string dataFilePath, primaryIndexFilePath;
+    vector<SecondaryIndex> vSecondaryIndex;
+    vector<LabelID> vLabelID;
+    string dataFilePath, primaryIndexFilePath, secondaryIndexFilePath, labelIDFilePath;
     /*
      * Checks if primary index file corresponds to the current data file
      * Returns 0 if it's not up to date, -1 if it doesn't exist, -2 if it exists but empty, 1 if it is up to date
@@ -218,39 +245,22 @@ private:
         fin.close();
         sort(vPrimaryIndex.begin(), vPrimaryIndex.end());
     }
-public:
-    CourseFileManager(string _dataFilePath = "defaultDataFile", string _primaryIndexFilePath = "")
+    void savePrimaryIndex()
     {
-        dataFilePath = _dataFilePath;
-        primaryIndexFilePath = dataFilePath + "PrimaryIndex.txt";
-        dataFilePath += ".txt";
+        ofstream fout(primaryIndexFilePath.c_str(), ios::binary);
 
-        createFile(dataFilePath);
-        createFile(primaryIndexFilePath);
+        bool notUpToDate = false;
+        fout.write((char*)&notUpToDate, sizeof(notUpToDate));
 
-        if (isPrimaryUpToDate() != 1)
+        for (auto r : vPrimaryIndex)
         {
-            reconstructPrimaryIndex();
-            loadPrimaryIndex();
+            fout.write(r.courseID, sizeof(r.courseID));
+            fout.write((char*)&r.offset, sizeof(r.offset));
         }
-        else
-            loadPrimaryIndex();
-    }
-    void addRecord(Course &crs)
-    {
-        changePrimaryIndexHeader(true);
-
-        fstream fout(dataFilePath, ios::in|ios::out|ios::binary);
-        fout.seekp(0, ios::end);
-        int address = fout.tellp();
-        addCourse(fout, crs);
-        int i = 0;
-        PrimaryIndexRecord r(crs.courseID, address);
-        vPrimaryIndex.push_back(r);
-        sort(vPrimaryIndex.begin(), vPrimaryIndex.end());
         fout.close();
     }
-    int binarySearch(char courseID[])
+
+    int PrimaryKeyBinarySearch(char *courseID)
     {
         int l = 0, r = (int)vPrimaryIndex.size() - 1;
         while(l <= r)
@@ -266,14 +276,185 @@ public:
         }
         return -1;
     }
+
+    int SecondaryKeyBinarySearch(const string &name)
+    {
+        int l = 0, r = (int)vSecondaryIndex.size() - 1;
+        while (l <= r)
+        {
+            int mid = (l + r)/2;
+            if (vSecondaryIndex[mid].instructorName == name)
+                return mid;
+            else if (name < vSecondaryIndex[mid].instructorName)
+                r = mid - 1;
+            else
+                l = mid + 1;
+        }
+        return -1;
+    }
+
+    /*
+     * loads secondary index in main memory
+     */
+    void loadSecondaryIndex()
+    {
+        vLabelID.clear();
+        vSecondaryIndex.clear();
+        fstream fin(dataFilePath.c_str(), ios::binary|ios::in|ios::out);
+        Course crs;
+        while(true)
+        {
+            if (!readCourse(fin, crs))
+                break;
+            if (crs.courseID[0] =='*')
+                continue;
+            short next = -1;
+
+            int idx = SecondaryKeyBinarySearch(crs.instructorName);
+            if (idx == -1)
+            {
+                SecondaryIndex r(crs.instructorName, vLabelID.size());
+                vSecondaryIndex.push_back(r);
+                sort(vSecondaryIndex.begin(), vSecondaryIndex.end());
+            }
+            else
+            {
+                next = vSecondaryIndex[idx].RRN;
+                vSecondaryIndex[idx].RRN = vLabelID.size();
+            }
+            vLabelID.push_back(LabelID(crs.courseID, next));
+
+        }
+        fin.close();
+    }
+    void saveSecondaryIndex()
+    {
+        ofstream outSecondary(secondaryIndexFilePath.c_str(), ios::binary);
+        ofstream outLabel(labelIDFilePath.c_str(), ios::binary);
+
+        bool notUpToDate = false;
+        outSecondary.write((char*)&notUpToDate, sizeof(notUpToDate));
+
+        for (auto r : vSecondaryIndex)
+        {
+            if (r.RRN != -1)
+            {
+                outSecondary.write(r.instructorName.c_str(), r.instructorName.size());
+                outSecondary.write((char *) &r.RRN, sizeof(r.RRN));
+            }
+        }
+        outSecondary.close();
+
+        for (auto r : vLabelID)
+        {
+            outLabel.write(r.courseID, sizeof(r.courseID));
+            outLabel.write((char*)&r.next, sizeof(r.next));
+        }
+        outLabel.close();
+    }
+
+
+    void changeSecondaryIndexHeader(bool header)
+    {
+        fstream fout(secondaryIndexFilePath.c_str(), ios::out|ios::in|ios::binary);
+        fout.write((char*)&header, sizeof(header));
+        fout.close();
+    }
+
+    int isSecondaryUpToDate()
+    {
+        if (!exists(secondaryIndexFilePath))
+            return -1;
+
+        ifstream fin(secondaryIndexFilePath.c_str(), ios::binary);
+        bool notUpToDateHeader;
+        fin.read((char*)&notUpToDateHeader, sizeof(notUpToDateHeader));
+
+        if (fin.fail() || fin.eof()) // file exists but empty
+            return -2;
+
+        fin.close();
+        return !notUpToDateHeader;
+
+    }
+
+    void reconstructSecondaryIndex()
+    {
+        loadSecondaryIndex();
+        saveSecondaryIndex();
+    }
+
+    void insertSecondary(Course &crs)
+    {
+        int idx = SecondaryKeyBinarySearch(crs.instructorName);
+        int next = -1;
+        if (idx == -1)
+        {
+            vSecondaryIndex.push_back(SecondaryIndex(crs.instructorName, vLabelID.size()));
+            sort(vSecondaryIndex.begin(), vSecondaryIndex.end());
+        }
+        else
+        {
+            next = vSecondaryIndex[idx].RRN;
+            vSecondaryIndex[idx].RRN = vLabelID.size();
+        }
+        vLabelID.push_back(LabelID(crs.courseID, next));
+    }
+public:
+    CourseFileManager(string _dataFilePath = "defaultDataFile")
+    {
+        dataFilePath = _dataFilePath;
+        primaryIndexFilePath = dataFilePath + "PrimaryIndex.txt";
+        secondaryIndexFilePath = dataFilePath + "SecondaryIndex.txt";
+        labelIDFilePath = dataFilePath + "LabelID.txt";
+        dataFilePath += ".txt";
+
+        createFile(dataFilePath);
+        createFile(primaryIndexFilePath);
+        createFile(secondaryIndexFilePath);
+        createFile(labelIDFilePath);
+
+        if (isPrimaryUpToDate() != 1)
+        {
+            reconstructPrimaryIndex();
+            loadPrimaryIndex();
+        }
+        else
+            loadPrimaryIndex();
+
+        if (isSecondaryUpToDate() != 1)
+        {
+            reconstructSecondaryIndex();
+        }
+        else
+            loadSecondaryIndex();
+    }
+    void addRecord(Course &crs)
+    {
+        changePrimaryIndexHeader(true);
+        changeSecondaryIndexHeader(true);
+        fstream fout(dataFilePath, ios::in|ios::out|ios::binary);
+        fout.seekp(0, ios::end);
+        int address = fout.tellp();
+        addCourse(fout, crs);
+        int i = 0;
+        PrimaryIndexRecord r(crs.courseID, address);
+        vPrimaryIndex.push_back(r);
+        sort(vPrimaryIndex.begin(), vPrimaryIndex.end());
+
+        insertSecondary(crs);
+        fout.close();
+    }
     /*
      * returns false if record is not found
      */
     bool deleteRecord(char courseID[])
     {
-        int idx = binarySearch(courseID);
+        int idx = PrimaryKeyBinarySearch(courseID);
         if (idx == -1)
             return false;
+
+        changePrimaryIndexHeader(true);
 
         int address = vPrimaryIndex[idx].offset;
         fstream fout(dataFilePath, ios::in|ios::out|ios::binary);
@@ -287,10 +468,14 @@ public:
     /*
      * returns false if record is not found
      */
-    bool updateRecord(char courseID[], Course &crs)
+    bool updateRecord(char courseID[], Course &crs, bool keepID = false)
     {
         if (!deleteRecord(courseID))
             return false;
+
+        changePrimaryIndexHeader(true);
+        if (keepID)
+            strcpy(crs.courseID, courseID);
         addRecord(crs);
         return true;
     }
@@ -312,7 +497,7 @@ public:
     }
     bool printByCourseID(char courseID[])
     {
-        int idx = binarySearch(courseID);
+        int idx = PrimaryKeyBinarySearch(courseID);
         if (idx == -1)
             return false;
         int address = vPrimaryIndex[idx].offset;
@@ -325,8 +510,39 @@ public:
     }
     ~CourseFileManager()
     {
-        //saves primary index file
-        reconstructPrimaryIndex();
+        savePrimaryIndex();
+        saveSecondaryIndex();
+    }
+
+    bool printByInstructorName(const string &name)
+    {
+        int idx = SecondaryKeyBinarySearch(name);
+        if (idx == -1)
+            return 0;
+        for (int k = vSecondaryIndex[idx].RRN; k != -1; k = vLabelID[k].next)
+            printByCourseID(vLabelID[k].courseID);
+        return 1;
+    }
+
+    bool updateRecordByInstructorName(const string &name, Course &crs)
+    {
+        int idx = SecondaryKeyBinarySearch(name);
+        if (idx == -1)
+            return 0;
+        for (int k = vSecondaryIndex[idx].RRN; k != -1; k = vLabelID[k].next)
+            updateRecord(vLabelID[k].courseID, crs);
+        return 1;
+    }
+
+    bool deleteRecordByInstructorName(const string &name)
+    {
+        int idx = SecondaryKeyBinarySearch(name);
+        if (idx == -1)
+            return 0;
+        for (int k = vSecondaryIndex[idx].RRN; k != -1; k = vLabelID[k].next)
+            deleteRecord(vLabelID[k].courseID);
+        return 1;
+
     }
 };
 
@@ -337,8 +553,11 @@ void printMenu()
             "2- Add Course\n"
             "3- Delete Course (by Course ID)\n"
             "4- Update Course (by Course ID\n"
-            "5- Print (by Course ID)\n"
-            "6- Close current file\n"
+            "5- Print Course (by Course ID)\n"
+            "6- Delete Course (by instructor name)\n"
+            "7- Update Course (by instructor name)\n"
+            "8- Print Course (by instructor name)\n"
+            "9- Close current file\n"
             "0- Exit\n\n";
 }
 
@@ -424,6 +643,36 @@ int main()
                     break;
                 }
                 case 6:
+                {
+                    string name;
+                    cout << "Enter instructor name: ";
+                    cin.ignore(32767, '\n');
+                    getline(cin, name);
+                    manager->deleteRecordByInstructorName(name);
+                    break;
+                }
+                case 7:
+                {
+                    string name;
+                    cout << "Enter instructor name: ";
+                    cin.ignore(32767, '\n');
+                    getline(cin, name);
+                    Course crs;
+                    cout << "Enter new course: \n";
+                    cin >> crs;
+                    manager->updateRecordByInstructorName(name, crs);
+                    break;
+                }
+                case 8:
+                {
+                    string name;
+                    cout << "Enter instructor name: ";
+                    cin.ignore(32767, '\n');
+                    getline(cin, name);
+                    manager->printByInstructorName(name);
+                    break;
+                }
+                case 9:
                 {
                     delete manager;
                     manager = 0;
